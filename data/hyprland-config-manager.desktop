@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Hyprland Config Manager
+GenericName=Hyprland Settings
+Comment=Modern graphical configuration manager for Hyprland
+Exec=hyprland-config-manager
+Icon=hyprland-config-manager
+Terminal=false
+Type=Application
+Categories=Utility;Settings;DesktopSettings;
+Keywords=hyprland;wayland;config;settings;monitors;animations;keybinds;
+StartupNotify=true
+StartupWMClass=io.github.hyprconf_manager

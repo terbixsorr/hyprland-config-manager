@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hyprland-config-manager"
+version = "1.0.0"
+description = "Modern native GTK4/Libadwaita graphical configuration manager for Hyprland on Arch Linux"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+authors = [
+    { name = "Hyprland Community Developer" }
+]
+keywords = ["hyprland", "wayland", "archlinux", "gtk4", "libadwaita", "settings", "config"]
+classifiers = [
+    "Environment :: X11 Applications :: GTK",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Desktop Environment",
+    "Topic :: Utilities"
+]
+
+dependencies = []
+
+[project.scripts]
+hyprland-config-manager = "hyprconf_manager.main:main"
