@@ -62,7 +62,30 @@ class ConfigEditorPageBuilder:
         scrolled.set_hexpand(True)
         scrolled.add_css_class("card")
 
-        self.text_view = Gtk.TextView()
+        try:
+            gi.require_version("GtkSource", "5")
+            from gi.repository import GtkSource
+            has_sourceview = True
+        except (ValueError, ImportError):
+            has_sourceview = False
+
+        if has_sourceview:
+            self.text_view = GtkSource.View()
+            self.text_view.set_show_line_numbers(True)
+            self.text_view.set_highlight_current_line(True)
+            self.text_view.set_tab_width(4)
+            self.text_view.set_indent_width(4)
+            self.text_view.set_auto_indent(True)
+            self.buffer = GtkSource.Buffer()
+            lm = GtkSource.LanguageManager.get_default()
+            lang = lm.get_language("ini") or lm.get_language("sh")
+            if lang:
+                self.buffer.set_language(lang)
+            self.text_view.set_buffer(self.buffer)
+        else:
+            self.text_view = Gtk.TextView()
+            self.buffer = self.text_view.get_buffer()
+
         self.text_view.set_monospace(True)
         self.text_view.set_wrap_mode(Gtk.WrapMode.NONE)
         self.text_view.set_left_margin(12)
@@ -70,7 +93,6 @@ class ConfigEditorPageBuilder:
         self.text_view.set_top_margin(12)
         self.text_view.set_bottom_margin(12)
 
-        self.buffer = self.text_view.get_buffer()
         # Initial text from engine
         current_text = self.engine.generate_candidate_config()
         self.buffer.set_text(current_text)

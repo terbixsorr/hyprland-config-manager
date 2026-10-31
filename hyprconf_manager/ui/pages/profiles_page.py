@@ -231,6 +231,18 @@ class ProfilesPageBuilder:
                         },
                         "appearance": {
                             "theme_name": self.engine.appearance.theme_name
+                        },
+                        "input": {
+                            "kb_layout": self.engine.input_cfg.kb_layout,
+                            "kb_options": self.engine.input_cfg.kb_options,
+                            "repeat_rate": self.engine.input_cfg.repeat_rate,
+                            "repeat_delay": self.engine.input_cfg.repeat_delay,
+                            "sensitivity": self.engine.input_cfg.sensitivity,
+                            "accel_profile": self.engine.input_cfg.accel_profile,
+                            "natural_scroll": self.engine.input_cfg.natural_scroll,
+                            "touchpad_tap_to_click": self.engine.input_cfg.touchpad_tap_to_click,
+                            "touchpad_natural_scroll": self.engine.input_cfg.touchpad_natural_scroll,
+                            "touchpad_disable_while_typing": self.engine.input_cfg.touchpad_disable_while_typing,
                         }
                     }
                     self.profile_mgr.save_profile(p_name, p_data)

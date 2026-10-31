@@ -9,7 +9,7 @@ from typing import List, Dict, Optional, Any
 
 @dataclass
 class MonitorConfig:
-    name: str = "DP-1"
+    name: str = ""  # empty string means default wildcard monitor
     resolution: str = "1920x1080"
     refresh_rate: float = 60.0
     position: str = "0x0"
@@ -21,7 +21,7 @@ class MonitorConfig:
 
     def to_directive_value(self) -> str:
         if not self.enabled:
-            return f"{self.name},disable"
+            return f"{self.name},disable" if self.name else ",disable"
         
         mode = f"{self.resolution}@{self.refresh_rate:g}" if self.refresh_rate else self.resolution
         val = f"{self.name},{mode},{self.position},{self.scale:g}"
@@ -221,9 +221,11 @@ class KeybindItem:
     def get_full_combination(self) -> str:
         mods = self.modifier.strip().replace(" ", "")
         k = self.key.strip()
-        if mods:
+        if mods and k:
             return f"{mods} + {k}"
-        return k
+        elif k:
+            return k
+        return mods or "Unbound"
 
     def to_directive(self) -> str:
         prefix = f"bind{self.flag}" if self.flag else "bind"
@@ -248,6 +250,14 @@ class InputConfig:
     touchpad_tap_to_click: bool = True
     touchpad_drag_lock: bool = False
     touchpad_disable_while_typing: bool = True
+
+    @property
+    def sensitivity(self) -> float:
+        return self.mouse_sensitivity
+
+    @sensitivity.setter
+    def sensitivity(self, val: float):
+        self.mouse_sensitivity = float(val)
 
 
 @dataclass
@@ -301,7 +311,18 @@ class WindowRuleItem:
     raw_rule: str = ""
 
     def to_directive(self) -> str:
-        if self.raw_rule:
+        # If no structured properties are set and raw_rule is available, preserve raw
+        has_structured = any([
+            self.app_class,
+            self.app_title,
+            self.workspace,
+            self.floating is not None,
+            self.fullscreen is not None,
+            self.opacity is not None,
+            self.size,
+            self.position,
+        ])
+        if not has_structured and self.raw_rule:
             return self.raw_rule
 
         # windowrulev2 = action, filters

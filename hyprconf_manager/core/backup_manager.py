@@ -1,6 +1,6 @@
 """
 Backup Manager for Hyprland configuration.
-Creates timestamped snapshots before applies and profile switches,
+Creates timestamped, collision-free snapshots before applies and profile switches,
 manages retention, provides diffs, and handles instant rollback.
 """
 
@@ -35,38 +35,100 @@ class BackupManager:
 
     def _load_index(self) -> List[dict]:
         if not os.path.exists(self.index_file):
-            return []
+            return self._rebuild_index_from_disk()
         try:
             with open(self.index_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data if isinstance(data, list) else []
+                if isinstance(data, list):
+                    return data
+                return self._rebuild_index_from_disk()
         except Exception:
-            return []
+            # Self-heal index on corrupted JSON
+            return self._rebuild_index_from_disk()
 
-    def _save_index(self, entries: List[dict]):
+    def _rebuild_index_from_disk(self) -> List[dict]:
+        """
+        Reconstructs the index by scanning files in backup_dir.
+        Ensures existing snapshots are never lost even if index.json is damaged.
+        """
+        rebuilt = []
+        if not os.path.exists(self.backup_dir):
+            return rebuilt
+
         try:
-            with open(self.index_file, "w", encoding="utf-8") as f:
-                json.dump(entries, f, indent=2, ensure_ascii=False)
+            for fname in os.listdir(self.backup_dir):
+                if fname.startswith("hyprland_") and fname.endswith(".conf"):
+                    fpath = os.path.join(self.backup_dir, fname)
+                    if os.path.isfile(fpath):
+                        mtime = os.path.getmtime(fpath)
+                        dt = datetime.fromtimestamp(mtime)
+                        # Extract id from filename: hyprland_<id>.conf
+                        b_id = fname[len("hyprland_"):-len(".conf")]
+                        size = os.path.getsize(fpath)
+                        rebuilt.append({
+                            "id": b_id,
+                            "filename": fname,
+                            "timestamp": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                            "reason": "Recovered snapshot from disk",
+                            "size_bytes": size,
+                            "file_path": fpath
+                        })
+            # Sort newest first
+            rebuilt.sort(key=lambda x: x["timestamp"], reverse=True)
+            if rebuilt:
+                try:
+                    self._save_index(rebuilt)
+                except Exception:
+                    pass
         except Exception:
             pass
+        return rebuilt
+
+    def _save_index(self, entries: List[dict]):
+        tmp_index = f"{self.index_file}.tmp"
+        try:
+            with open(tmp_index, "w", encoding="utf-8") as f:
+                json.dump(entries, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_index, self.index_file)
+        except Exception as e:
+            if os.path.exists(tmp_index):
+                try:
+                    os.remove(tmp_index)
+                except Exception:
+                    pass
+            raise RuntimeError(f"Failed to persist backup index to {self.index_file}: {e}") from e
 
     def create_backup(self, content_or_path: str, reason: str = "Auto backup before Apply") -> BackupEntry:
+        entries = self._load_index()
+
         now = datetime.now()
-        timestamp_str = now.strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"hyprland_{timestamp_str}.conf"
+        base_id = f"{now.strftime('%Y-%m-%d_%H-%M-%S')}_{now.microsecond:06d}"
+        backup_id = base_id
+        counter = 1
+        filename = f"hyprland_{backup_id}.conf"
         target_path = os.path.join(self.backup_dir, filename)
+
+        # Guarantee unique filename and prevent overwrite even on sub-microsecond calls
+        while os.path.exists(target_path):
+            backup_id = f"{base_id}_{counter}"
+            filename = f"hyprland_{backup_id}.conf"
+            target_path = os.path.join(self.backup_dir, filename)
+            counter += 1
 
         if os.path.exists(content_or_path) and os.path.isfile(content_or_path):
             shutil.copy2(content_or_path, target_path)
-            with open(target_path, "r", encoding="utf-8", errors="replace") as f:
-                size_bytes = len(f.read().encode("utf-8"))
+            size_bytes = os.path.getsize(target_path)
         else:
             with open(target_path, "w", encoding="utf-8") as f:
                 f.write(content_or_path)
+                f.flush()
+                os.fsync(f.fileno())
             size_bytes = len(content_or_path.encode("utf-8"))
 
         entry = BackupEntry(
-            id=timestamp_str,
+            id=backup_id,
             filename=filename,
             timestamp=now.strftime("%Y-%m-%d %H:%M:%S"),
             reason=reason,
@@ -74,8 +136,8 @@ class BackupManager:
             file_path=target_path
         )
 
-        entries = self._load_index()
-        entries.insert(0, asdict(entry))
+        if not any(e.get("id") == backup_id for e in entries):
+            entries.insert(0, asdict(entry))
         self._save_index(entries)
         self.prune_old_backups(keep_max=30)
         return entry
@@ -108,7 +170,15 @@ class BackupManager:
             if b.id == backup_id:
                 try:
                     os.makedirs(os.path.dirname(os.path.abspath(target_config_path)), exist_ok=True)
-                    shutil.copy2(b.file_path, target_config_path)
+                    # Safe atomic copy to target
+                    tmp_restore = f"{target_config_path}.restore.tmp"
+                    shutil.copy2(b.file_path, tmp_restore)
+                    os.replace(tmp_restore, target_config_path)
+
+                    # Verify restored file
+                    if not os.path.exists(target_config_path) or os.path.getsize(target_config_path) == 0:
+                        return False, f"Restored file at {target_config_path} is empty or missing"
+
                     return True, f"Successfully restored backup from {b.timestamp}"
                 except Exception as e:
                     return False, f"Failed to restore backup: {str(e)}"

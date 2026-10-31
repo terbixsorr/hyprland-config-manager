@@ -1,8 +1,8 @@
 """
 Safe Apply & Rollback Pipeline for Hyprland configuration.
 Implements the atomic transactional flow:
-Current config -> Backup -> Generate -> Validate -> Atomic Apply -> Hyprland Reload -> Verify.
-If reload fails, automatically restores previous configuration.
+Current config -> Backup -> Generate -> Validate -> Permission-preserving Atomic Apply -> Hyprland Reload -> Verify.
+If compositor reload fails, performs an audited rollback with post-restore verification.
 """
 
 import os
@@ -39,8 +39,10 @@ class SafeApplyPipeline:
 
         # Step 1: Read current config on disk (or create empty if missing)
         current_disk_content = ""
+        orig_stat = None
         if os.path.exists(config_path):
             try:
+                orig_stat = os.stat(config_path)
                 with open(config_path, "r", encoding="utf-8", errors="replace") as f:
                     current_disk_content = f.read()
             except Exception as e:
@@ -75,13 +77,27 @@ class SafeApplyPipeline:
                 details=val_res.summary()
             )
 
-        # Step 5: Atomic write to disk
+        # Step 5: Permission-preserving atomic write to disk
         tmp_path = f"{config_path}.tmp"
         try:
             os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
             with open(tmp_path, "w", encoding="utf-8") as f:
                 f.write(candidate_text)
-            
+                f.flush()
+                os.fsync(f.fileno())
+
+            # Preserve original permissions and ownership
+            if orig_stat is not None:
+                try:
+                    os.chmod(tmp_path, orig_stat.st_mode)
+                except Exception:
+                    pass
+                if hasattr(os, "chown") and os.name != "nt":
+                    try:
+                        os.chown(tmp_path, orig_stat.st_uid, orig_stat.st_gid)
+                    except (PermissionError, OSError):
+                        pass
+
             # Atomic replacement
             if os.name == "nt":
                 if os.path.exists(config_path):
@@ -111,13 +127,27 @@ class SafeApplyPipeline:
             if not reload_ok:
                 # AUTOMATIC ROLLBACK TRIGGERED!
                 rollback_ok, rollback_msg = self.backup_mgr.restore_backup(backup_entry.id, config_path)
-                self.hyprctl.reload()  # Reload restored backup into Hyprland
+                
+                # Verify that restored file exists and reload compositor
+                file_restored = rollback_ok and os.path.exists(config_path) and os.path.getsize(config_path) > 0
+                post_reload_ok = False
+                post_reload_msg = ""
+                if file_restored:
+                    engine.load_file(config_path)
+                    post_reload_ok, post_reload_msg = self.hyprctl.reload()
+
+                details = (
+                    f"Compositor error: {reload_msg}\n"
+                    f"Rollback file restoration: {rollback_msg}\n"
+                    f"Rollback reload verification: {'Success' if post_reload_ok else 'Failed'} ({post_reload_msg})"
+                )
+
                 return ApplyResult(
                     success=False,
                     message="Hyprland rejected the configuration! Automatic rollback was executed.",
                     backup_created=backup_entry,
                     rollback_performed=True,
-                    details=f"Compositor error: {reload_msg}\nRollback status: {rollback_msg}"
+                    details=details
                 )
 
             return ApplyResult(
@@ -138,7 +168,7 @@ class SafeApplyPipeline:
 
     def rollback(self, engine: HyprlandConfigEngine, backup_id: Optional[str] = None) -> Tuple[bool, str]:
         """
-        Restores previous backup and reloads compositor.
+        Restores previous backup and reloads compositor with complete post-verification.
         """
         if not backup_id:
             latest = self.backup_mgr.get_latest_backup()
@@ -150,12 +180,18 @@ class SafeApplyPipeline:
         if not ok:
             return False, msg
 
+        # Verify restored file on disk
+        if not os.path.exists(engine.config_path) or os.path.getsize(engine.config_path) == 0:
+            return False, f"Restored file at {engine.config_path} is missing or empty."
+
         # Reload engine state from restored file
         engine.load_file(engine.config_path)
 
-        # If Hyprland is active, reload it
+        # If Hyprland is active, reload it and verify
         if self.hyprctl.get_status().is_running:
             r_ok, r_msg = self.hyprctl.reload()
-            return ok, f"{msg}. Hyprland reloaded: {r_msg}"
+            if not r_ok:
+                return False, f"Restored backup, but Hyprland reload reported an issue: {r_msg}"
+            return True, f"{msg}. Hyprland reloaded: {r_msg}"
 
         return True, f"{msg}. (Hyprland is offline)"

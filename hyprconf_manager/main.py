@@ -6,6 +6,7 @@ Supports both native GTK4/Libadwaita GUI mode and fast CLI operations.
 import argparse
 import os
 import sys
+import traceback
 
 from .core.config_engine import HyprlandConfigEngine
 from .core.backup_manager import BackupManager
@@ -34,6 +35,7 @@ def main():
     parser.add_argument("--activate-profile", help="Activate a specific configuration profile")
     parser.add_argument("--diff", action="store_true", help="Show diff between current disk config and candidate model")
     parser.add_argument("--cli", action="store_true", help="Force CLI mode even if display server is available")
+    parser.add_argument("-v", "--verbose", "--debug", action="store_true", help="Show detailed debug tracebacks on error")
 
     args, unknown = parser.parse_known_args()
 
@@ -100,26 +102,19 @@ def main():
             print(f"  • {p}{mark}: {desc}")
         sys.exit(0)
 
-    # 7. Activate profile
+    # 7. Activate profile (complete parameter application)
     if args.activate_profile:
         name = args.activate_profile
         data = profile_mgr.load_profile(name)
         if not data:
-            print(f"Error: Profile '{name}' not found.")
+            print(f"Error: Profile '{name}' not found or contains invalid configuration.")
             sys.exit(1)
+
         engine.load_file()
         backup_mgr.create_backup(engine.raw_original_content, reason=f"Backup before activating profile '{name}'")
-        if "windows" in data:
-            for k, v in data["windows"].items():
-                if hasattr(engine.windows, k):
-                    setattr(engine.windows, k, v)
-        if "animations" in data:
-            if "enabled" in data["animations"]:
-                engine.animations.enabled = data["animations"]["enabled"]
-            if "preset" in data["animations"]:
-                engine.animations.preset = data["animations"]["preset"]
-        if "appearance" in data and "theme_name" in data["appearance"]:
-            engine.appearance.theme_name = data["appearance"]["theme_name"]
+
+        # Apply ALL supported profile settings (windows, animations, appearance, input, env)
+        engine.apply_profile_data(data)
 
         res = safe_apply.apply(engine, reason=f"Activated profile '{name}'")
         if res.success:
@@ -144,17 +139,28 @@ def main():
             print("No differences found between disk config and candidate model.")
         sys.exit(0)
 
-    # 9. Launch Native GUI
+    # 9. Launch Native GUI with precise exception handling
+    if args.cli:
+        print("[Hyprland Config Manager] CLI mode requested. Run with --help for command options.")
+        sys.exit(0)
+
     try:
         from .ui.app import HyprlandConfigApp
         app = HyprlandConfigApp(config_path=args.config)
         sys.exit(app.run([sys.argv[0]] + unknown))
-    except (ImportError, Exception) as e:
-        print(f"[Hyprland Config Manager] Could not initialize graphical interface: {e}")
-        print("Falling back to CLI info mode. Run with --help for command line options.")
-        st = hyprctl.get_status()
-        print(f"Hyprland Status: {'Running' if st.is_running else 'Offline'} ({st.version})")
-        sys.exit(0)
+    except (ImportError, ModuleNotFoundError) as ie:
+        print(f"[Hyprland Config Manager] Graphical toolkit unavailable: {ie}")
+        print("Note: On Arch Linux, install dependencies: sudo pacman -S python-gobject gtk4 libadwaita")
+        if args.verbose:
+            traceback.print_exc()
+        sys.exit(1)
+    except Exception as e:
+        print(f"[Hyprland Config Manager] Error launching interface: {e}")
+        if args.verbose:
+            traceback.print_exc()
+        else:
+            print("Run with --verbose or --help to inspect error details.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

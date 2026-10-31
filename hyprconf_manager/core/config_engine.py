@@ -251,12 +251,38 @@ bind = $mainMod, 5, workspace, 5
             elif isinstance(node, SectionNode):
                 self._extract_from_section(node)
 
-        # Ensure at least one monitor is populated if none discovered
+        # Do not inject fake monitors. If empty, query real monitors from hyprctl if available.
         if not self.monitors:
-            self.monitors.append(MonitorConfig(name="DP-1", resolution="1920x1080", refresh_rate=60.0, position="0x0", scale=1.0, enabled=True))
+            try:
+                from .hyprctl import HyprctlClient
+                hyprctl = HyprctlClient()
+                if hyprctl.is_available() and hyprctl.get_status().is_running:
+                    real_mons = hyprctl.get_monitors()
+                    for rm in real_mons:
+                        m_name = rm.get("name", "")
+                        if m_name:
+                            w = rm.get("width", 1920)
+                            h = rm.get("height", 1080)
+                            rr = float(rm.get("refreshRate", 60.0))
+                            x = rm.get("x", 0)
+                            y = rm.get("y", 0)
+                            scale = float(rm.get("scale", 1.0))
+                            vrr = 1 if rm.get("vrr", False) else 0
+                            self.monitors.append(MonitorConfig(
+                                name=m_name,
+                                resolution=f"{w}x{h}",
+                                refresh_rate=rr,
+                                position=f"{x}x{y}",
+                                scale=scale,
+                                vrr=vrr,
+                                enabled=not rm.get("disabled", False)
+                            ))
+            except Exception:
+                pass
 
     def _parse_monitor_directive(self, val: str):
         # Format: name,resolution@refresh,position,scale,extras...
+        # or: ,preferred,auto,1
         # or: name,disable
         parts = [p.strip() for p in val.split(",")]
         if not parts:
@@ -284,6 +310,8 @@ bind = $mainMod, 5, workspace, 5
                     refresh = 60.0
             else:
                 res = res_part
+                if res in ("preferred", "highrr", "highres"):
+                    refresh = 0.0
 
         if len(parts) > 2:
             pos = parts[2]
@@ -641,6 +669,15 @@ bind = $mainMod, 5, workspace, 5
         # 5. Directives: monitors, binds, startup, env, workspace, windowrule
         # Filter existing ones out of root, then re-insert cleanly
         filtered_root = []
+        manager_headers = {
+            "=== Hyprland Config Manager Managed Directives ===",
+            "Monitors",
+            "Environment Variables",
+            "Startup Applications",
+            "Keybindings",
+            "Workspace Rules",
+            "Window Rules",
+        }
         for n in self.ast.nodes:
             if isinstance(n, DirectiveNode):
                 if n.directive in ("monitor", "workspace", "windowrule", "windowrulev2", "exec", "exec-once", "env"):
@@ -648,19 +685,25 @@ bind = $mainMod, 5, workspace, 5
                 if n.directive.startswith("bind"):
                     continue
             elif isinstance(n, CommentNode):
-                # If it's a commented exec, skip it because startup_items handles both
                 txt = n.text.strip()
                 if txt.startswith("exec-once = ") or txt.startswith("exec = "):
                     continue
+                if txt in manager_headers:
+                    continue
             filtered_root.append(n)
+
+        # Trim trailing blank lines from filtered root
+        while filtered_root and isinstance(filtered_root[-1], BlankLineNode):
+            filtered_root.pop()
 
         # Build list of new directive nodes
         directive_insertions: List[ASTNode] = [BlankLineNode(), CommentNode(text="=== Hyprland Config Manager Managed Directives ===")]
 
         # Monitors
-        directive_insertions.append(CommentNode(text="Monitors"))
-        for m in self.monitors:
-            directive_insertions.append(DirectiveNode(directive="monitor", value=m.to_directive_value()))
+        if self.monitors:
+            directive_insertions.append(CommentNode(text="Monitors"))
+            for m in self.monitors:
+                directive_insertions.append(DirectiveNode(directive="monitor", value=m.to_directive_value()))
 
         # Environment
         if self.env_cfg.vars:
@@ -707,6 +750,79 @@ bind = $mainMod, 5, workspace, 5
                 directive_insertions.append(DirectiveNode(directive=d_parts[0].strip(), value=d_parts[1].strip()))
 
         self.ast.nodes = filtered_root + directive_insertions
+
+    def apply_profile_data(self, data: Dict[str, Any]):
+        """
+        Applies all settings from a profile data dictionary to the engine models.
+        Supports windows, animations, appearance, input, and environment configurations.
+        """
+        if not isinstance(data, dict):
+            return
+
+        # 1. Appearance baseline (theme colors, baseline rounding)
+        if "appearance" in data and isinstance(data["appearance"], dict):
+            app_data = data["appearance"]
+            if "theme_name" in app_data:
+                t_name = app_data["theme_name"]
+                self.appearance.theme_name = t_name
+                if t_name in APPEARANCE_THEMES:
+                    t_data = APPEARANCE_THEMES[t_name]
+                    self.appearance.col_active_border = t_data["col_active_border"]
+                    self.appearance.col_inactive_border = t_data["col_inactive_border"]
+                    self.appearance.rounding = t_data["rounding"]
+                    self.windows.rounding = t_data["rounding"]
+                    self.windows.shadow_color = t_data["shadow_color"]
+            if "col_active_border" in app_data:
+                self.appearance.col_active_border = str(app_data["col_active_border"])
+            if "col_inactive_border" in app_data:
+                self.appearance.col_inactive_border = str(app_data["col_inactive_border"])
+            if "rounding" in app_data:
+                self.appearance.rounding = int(app_data["rounding"])
+                self.windows.rounding = int(app_data["rounding"])
+
+        # 2. Windows specific geometry and decoration (overrides theme defaults)
+        if "windows" in data and isinstance(data["windows"], dict):
+            for k, v in data["windows"].items():
+                if hasattr(self.windows, k):
+                    setattr(self.windows, k, v)
+
+        # 3. Animations
+        if "animations" in data and isinstance(data["animations"], dict):
+            a_data = data["animations"]
+            if "preset" in a_data:
+                p_name = a_data["preset"]
+                self.animations.preset = p_name
+                if p_name in ANIMATION_PRESETS:
+                    p_preset = ANIMATION_PRESETS[p_name]
+                    self.animations.enabled = p_preset.get("enabled", self.animations.enabled)
+                    for t_k, t_v in p_preset.get("animations", {}).items():
+                        if t_k in self.animations.animations:
+                            self.animations.animations[t_k].update(t_v)
+                        else:
+                            self.animations.animations[t_k] = dict(t_v)
+            if "enabled" in a_data:
+                self.animations.enabled = bool(a_data["enabled"])
+            if "bezier_curves" in a_data and isinstance(a_data["bezier_curves"], dict):
+                self.animations.bezier_curves.update(a_data["bezier_curves"])
+            if "animations" in a_data and isinstance(a_data["animations"], dict):
+                for k, v in a_data["animations"].items():
+                    if isinstance(v, dict):
+                        if k in self.animations.animations:
+                            self.animations.animations[k].update(v)
+                        else:
+                            self.animations.animations[k] = v
+
+        # 4. Input devices
+        if "input" in data and isinstance(data["input"], dict):
+            for k, v in data["input"].items():
+                target_k = "mouse_sensitivity" if k == "sensitivity" else k
+                if hasattr(self.input_cfg, target_k):
+                    setattr(self.input_cfg, target_k, v)
+
+        # 5. Environment variables
+        if "env" in data and isinstance(data["env"], dict):
+            for k, v in data["env"].items():
+                self.env_cfg.vars[str(k)] = str(v)
 
     def generate_candidate_config(self) -> str:
         self.sync_models_to_ast()

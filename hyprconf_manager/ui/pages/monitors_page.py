@@ -30,37 +30,49 @@ class MonitorsPageBuilder:
         real_monitors = self.hyprctl.get_monitors()
         configured_map = {m.name: m for m in self.engine.monitors}
 
-        # Merge real detected monitors with config
+        # Merge real detected monitors with config without inventing fake ones
         active_mon_names = set()
         for rm in real_monitors:
             name = rm.get("name", "")
-            active_mon_names.add(name)
-            if name not in configured_map:
-                w = rm.get("width", 1920)
-                h = rm.get("height", 1080)
-                rr = float(rm.get("refreshRate", 60.0))
-                x = rm.get("x", 0)
-                y = rm.get("y", 0)
-                scale = float(rm.get("scale", 1.0))
-                vrr = 1 if rm.get("vrr", False) else 0
-                new_mon = MonitorConfig(
-                    name=name,
-                    resolution=f"{w}x{h}",
-                    refresh_rate=rr,
-                    position=f"{x}x{y}",
-                    scale=scale,
-                    vrr=vrr,
-                    enabled=not rm.get("disabled", False)
-                )
-                self.engine.monitors.append(new_mon)
-                configured_map[name] = new_mon
+            if name:
+                active_mon_names.add(name)
+                if name not in configured_map:
+                    w = rm.get("width", 1920)
+                    h = rm.get("height", 1080)
+                    rr = float(rm.get("refreshRate", 60.0))
+                    x = rm.get("x", 0)
+                    y = rm.get("y", 0)
+                    scale = float(rm.get("scale", 1.0))
+                    vrr = 1 if rm.get("vrr", False) else 0
+                    new_mon = MonitorConfig(
+                        name=name,
+                        resolution=f"{w}x{h}",
+                        refresh_rate=rr,
+                        position=f"{x}x{y}",
+                        scale=scale,
+                        vrr=vrr,
+                        enabled=not rm.get("disabled", False)
+                    )
+                    self.engine.monitors.append(new_mon)
+                    configured_map[name] = new_mon
+
+        if not self.engine.monitors:
+            grp_empty = Adw.PreferencesGroup()
+            grp_empty.set_title("Display Rules")
+            row_empty = Adw.ActionRow()
+            row_empty.set_title("No Specific Monitor Rules Configured")
+            row_empty.set_subtitle("Hyprland uses default automatic detection (monitor = ,preferred,auto,1). Click below to create a custom display rule.")
+            row_empty.set_icon_name("video-display-symbolic")
+            grp_empty.add(row_empty)
+            page.add(grp_empty)
 
         # Group for each monitor
-        for mon in self.engine.monitors:
+        for mon in list(self.engine.monitors):
             grp = Adw.PreferencesGroup()
             is_detected = mon.name in active_mon_names
             status_text = " (Connected via Wayland)" if is_detected else " (Configured in hyprland.conf)"
-            grp.set_title(f"Monitor: {mon.name}{status_text}")
+            display_name = "Default / All Displays" if not mon.name else mon.name
+            grp.set_title(f"Monitor: {display_name}{status_text}")
 
             # Enabled Switch
             row_enable = Adw.SwitchRow()
@@ -70,16 +82,23 @@ class MonitorsPageBuilder:
             row_enable.connect("notify::active", self._make_bool_setter(mon, "enabled"))
             grp.add(row_enable)
 
+            # Monitor Name entry
+            row_name = Adw.EntryRow()
+            row_name.set_title("Display Identifier (eDP-1, DP-1, HDMI-A-1, or blank for wildcard)")
+            row_name.set_text(mon.name)
+            row_name.connect("changed", self._make_str_setter(mon, "name"))
+            grp.add(row_name)
+
             # Resolution Row
             row_res = Adw.EntryRow()
-            row_res.set_title("Resolution (Width x Height)")
+            row_res.set_title("Resolution (Width x Height or preferred)")
             row_res.set_text(mon.resolution)
             row_res.connect("changed", self._make_str_setter(mon, "resolution"))
             grp.add(row_res)
 
             # Refresh Rate Row
-            row_rr = Adw.SpinRow.new_with_range(24.0, 360.0, 1.0)
-            row_rr.set_title("Refresh Rate (Hz)")
+            row_rr = Adw.SpinRow.new_with_range(0.0, 360.0, 1.0)
+            row_rr.set_title("Refresh Rate (Hz, 0 for auto)")
             row_rr.set_value(mon.refresh_rate)
             row_rr.connect("notify::value", self._make_spin_setter(mon, "refresh_rate"))
             grp.add(row_rr)
@@ -94,8 +113,8 @@ class MonitorsPageBuilder:
 
             # Position Row
             row_pos = Adw.EntryRow()
-            row_pos.set_title("Position (XxY)")
-            row_pos.set_subtitle("Coordinates on virtual Wayland desktop (e.g. 0x0, 1920x0)")
+            row_pos.set_title("Position (XxY or auto)")
+            row_pos.set_subtitle("Coordinates on virtual Wayland desktop (e.g. 0x0, 1920x0, auto)")
             row_pos.set_text(mon.position)
             row_pos.connect("changed", self._make_str_setter(mon, "position"))
             grp.add(row_pos)
@@ -118,12 +137,20 @@ class MonitorsPageBuilder:
             row_trans.connect("notify::selected", self._make_combo_setter(mon, "transform"))
             grp.add(row_trans)
 
+            # Delete button row
+            btn_del = Gtk.Button(label="Remove Display Rule")
+            btn_del.set_icon_name("user-trash-symbolic")
+            btn_del.add_css_class("destructive-action")
+            btn_del.connect("clicked", self._make_delete_monitor_handler(mon))
+            grp.add(btn_del)
+
             page.add(grp)
 
-        # Group for Adding a Custom / Virtual Monitor
+        # Group for Adding a Custom Monitor
         add_grp = Adw.PreferencesGroup()
         btn_add = Gtk.Button(label="Add Display Configuration")
         btn_add.set_icon_name("list-add-symbolic")
+        btn_add.add_css_class("suggested-action")
         btn_add.connect("clicked", lambda b: self._add_new_monitor())
         add_grp.add(btn_add)
         page.add(add_grp)
@@ -153,6 +180,14 @@ class MonitorsPageBuilder:
             setattr(obj, prop, widget.get_selected())
             self.win.mark_modified()
         return setter
+
+    def _make_delete_monitor_handler(self, mon):
+        def handler(button):
+            if mon in self.engine.monitors:
+                self.engine.monitors.remove(mon)
+                self.win.mark_modified()
+                self.win.refresh_current_page()
+        return handler
 
     def _add_new_monitor(self):
         new_name = f"DP-{len(self.engine.monitors) + 1}"

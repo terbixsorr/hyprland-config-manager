@@ -305,24 +305,8 @@ class MainWindow:
         # Auto backup current before profile switch
         self.backup_mgr.create_backup(self.engine.generate_candidate_config(), reason=f"Auto backup before activating profile '{name}'")
 
-        # Apply profile data to models
-        if "windows" in data:
-            w_data = data["windows"]
-            for k, v in w_data.items():
-                if hasattr(self.engine.windows, k):
-                    setattr(self.engine.windows, k, v)
-
-        if "animations" in data:
-            a_data = data["animations"]
-            if "enabled" in a_data:
-                self.engine.animations.enabled = a_data["enabled"]
-            if "preset" in a_data:
-                self.engine.animations.preset = a_data["preset"]
-
-        if "appearance" in data:
-            app_data = data["appearance"]
-            if "theme_name" in app_data:
-                self.engine.appearance.theme_name = app_data["theme_name"]
+        # Apply profile data to models completely (windows, animations, appearance, input, env)
+        self.engine.apply_profile_data(data)
 
         self.profile_mgr.set_active_profile(name)
         self.mark_modified()

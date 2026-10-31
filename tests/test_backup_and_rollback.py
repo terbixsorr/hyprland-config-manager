@@ -39,6 +39,45 @@ class TestBackupManager(unittest.TestCase):
         with open(restore_target, "r") as f:
             self.assertEqual(f.read(), content)
 
+    def test_rapid_backups_unique_timestamps_no_overwrite(self):
+        """Test that rapid backup creation in the same second never collides or overwrites."""
+        created_entries = []
+        for i in range(10):
+            entry = self.backup_mgr.create_backup(f"# Snapshot {i}\n", reason=f"Rapid test {i}")
+            created_entries.append(entry)
+
+        # All IDs and file paths must be strictly unique
+        ids = [e.id for e in created_entries]
+        files = [e.file_path for e in created_entries]
+        self.assertEqual(len(ids), len(set(ids)), "Backup IDs collided!")
+        self.assertEqual(len(files), len(set(files)), "Backup file paths collided!")
+
+        # All files must physically exist on disk
+        for f in files:
+            self.assertTrue(os.path.exists(f))
+
+        # Index must report all 10 snapshots
+        backups = self.backup_mgr.list_backups()
+        self.assertEqual(len(backups), 10)
+
+    def test_index_self_healing_from_disk(self):
+        """Test that if index.json is deleted or corrupted, BackupManager recovers files from disk."""
+        entry1 = self.backup_mgr.create_backup("config 1", reason="One")
+        entry2 = self.backup_mgr.create_backup("config 2", reason="Two")
+
+        # Corrupt / delete index.json
+        index_file = os.path.join(self.temp_dir, "index.json")
+        with open(index_file, "w") as f:
+            f.write("INVALID JSON {[[")
+
+        # Re-initialize BackupManager
+        healed_mgr = BackupManager(backup_dir=self.temp_dir)
+        backups = healed_mgr.list_backups()
+        self.assertEqual(len(backups), 2)
+        recovered_ids = [b.id for b in backups]
+        self.assertIn(entry1.id, recovered_ids)
+        self.assertIn(entry2.id, recovered_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

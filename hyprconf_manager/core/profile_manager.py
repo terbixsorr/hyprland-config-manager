@@ -1,7 +1,7 @@
 """
 Profile Manager for Hyprland Config Manager.
 Allows saving, switching, exporting, importing, and activating named profiles
-such as Gaming, Work, Laptop, Minimal, and Streaming.
+such as Gaming, Work, Laptop, Minimal, and Streaming with strict JSON validation.
 """
 
 import json
@@ -9,6 +9,112 @@ import os
 import shutil
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional, Tuple
+
+
+def validate_profile_dict(data: Any) -> Tuple[bool, str]:
+    """
+    Validates structure, keys, and types of a profile dictionary.
+    Returns (True, "") if valid, or (False, "Reason...") if invalid.
+    """
+    if not isinstance(data, dict):
+        return False, "Profile root must be a JSON object (dictionary)."
+
+    allowed_top_keys = {"name", "description", "windows", "animations", "appearance", "input", "env"}
+    unknown_keys = set(data.keys()) - allowed_top_keys
+    if unknown_keys:
+        return False, f"Profile contains unknown top-level section(s): {', '.join(unknown_keys)}"
+
+    # Validate name and description
+    if "name" in data and not isinstance(data["name"], str):
+        return False, "Property 'name' must be a string."
+    if "description" in data and not isinstance(data["description"], str):
+        return False, "Property 'description' must be a string."
+
+    # Validate windows section
+    if "windows" in data:
+        w = data["windows"]
+        if not isinstance(w, dict):
+            return False, "Section 'windows' must be a JSON object."
+        int_non_neg_fields = [
+            "border_size", "rounding", "gaps_in", "gaps_out", "shadow_range",
+            "shadow_render_power", "blur_size", "blur_passes"
+        ]
+        for field in int_non_neg_fields:
+            if field in w:
+                val = w[field]
+                if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                    return False, f"'windows.{field}' must be a non-negative integer."
+
+        for op_field in ("active_opacity", "inactive_opacity", "fullscreen_opacity"):
+            if op_field in w:
+                val = w[op_field]
+                if not isinstance(val, (int, float)) or isinstance(val, bool) or not (0.0 <= val <= 1.0):
+                    return False, f"'windows.{op_field}' must be a float between 0.0 and 1.0."
+
+        for b_field in ("drop_shadow", "blur_enabled", "blur_new_optimizations"):
+            if b_field in w and not isinstance(w[b_field], bool):
+                return False, f"'windows.{b_field}' must be a boolean (true/false)."
+
+        if "layout" in w and w["layout"] not in ("dwindle", "master"):
+            return False, "'windows.layout' must be either 'dwindle' or 'master'."
+
+    # Validate animations section
+    if "animations" in data:
+        a = data["animations"]
+        if not isinstance(a, dict):
+            return False, "Section 'animations' must be a JSON object."
+        if "enabled" in a and not isinstance(a["enabled"], bool):
+            return False, "'animations.enabled' must be a boolean."
+        if "preset" in a and not isinstance(a["preset"], str):
+            return False, "'animations.preset' must be a string."
+        if "bezier_curves" in a:
+            if not isinstance(a["bezier_curves"], dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in a["bezier_curves"].items()):
+                return False, "'animations.bezier_curves' must be an object of curve names and coordinate strings."
+
+    # Validate appearance section
+    if "appearance" in data:
+        app = data["appearance"]
+        if not isinstance(app, dict):
+            return False, "Section 'appearance' must be a JSON object."
+        for str_field in ("theme_name", "col_active_border", "col_inactive_border"):
+            if str_field in app and not isinstance(app[str_field], str):
+                return False, f"'appearance.{str_field}' must be a string."
+        if "rounding" in app:
+            val = app["rounding"]
+            if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                return False, "'appearance.rounding' must be a non-negative integer."
+
+    # Validate input section
+    if "input" in data:
+        inp = data["input"]
+        if not isinstance(inp, dict):
+            return False, "Section 'input' must be a JSON object."
+        for sens_field in ("sensitivity", "mouse_sensitivity"):
+            if sens_field in inp:
+                val = inp[sens_field]
+                if not isinstance(val, (int, float)) or isinstance(val, bool) or not (-1.0 <= val <= 1.0):
+                    return False, f"'input.{sens_field}' must be a number between -1.0 and 1.0."
+        if "accel_profile" in inp and inp["accel_profile"] not in ("adaptive", "flat", "custom"):
+            return False, "'input.accel_profile' must be one of: adaptive, flat, custom."
+        for bool_field in (
+            "natural_scroll", "touchpad_natural_scroll", "touchpad_tap_to_click",
+            "touchpad_drag_lock", "touchpad_disable_while_typing", "numlock_by_default"
+        ):
+            if bool_field in inp and not isinstance(inp[bool_field], bool):
+                return False, f"'input.{bool_field}' must be a boolean."
+        for int_pos_field in ("repeat_rate", "repeat_delay"):
+            if int_pos_field in inp:
+                val = inp[int_pos_field]
+                if not isinstance(val, int) or isinstance(val, bool) or val <= 0:
+                    return False, f"'input.{int_pos_field}' must be a positive integer."
+
+    # Validate env section
+    if "env" in data:
+        e = data["env"]
+        if not isinstance(e, dict) or not all(isinstance(k, str) and isinstance(v, (str, int, float)) for k, v in e.items()):
+            return False, "Section 'env' must be an object mapping variable names to string values."
+
+    return True, ""
 
 
 DEFAULT_PROFILES = {
@@ -180,25 +286,41 @@ class ProfileManager:
             return None
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                valid, _ = validate_profile_dict(data)
+                return data if valid else None
         except Exception:
             return None
 
-    def save_profile(self, name: str, data: Dict[str, Any]) -> bool:
+    def save_profile(self, name: str, data: Dict[str, Any]) -> Tuple[bool, str]:
+        valid, msg = validate_profile_dict(data)
+        if not valid:
+            return False, f"Validation error: {msg}"
+
         path = self._get_profile_path(name)
+        tmp_path = f"{path}.tmp"
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            return True
-        except Exception:
-            return False
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+            return True, ""
+        except Exception as e:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            return False, f"Failed to save profile: {e}"
 
     def duplicate_profile(self, source_name: str, new_name: str) -> bool:
         data = self.load_profile(source_name)
         if data is None:
             return False
         data["description"] = f"Copy of {source_name}"
-        return self.save_profile(new_name, data)
+        ok, _ = self.save_profile(new_name, data)
+        return ok
 
     def rename_profile(self, old_name: str, new_name: str) -> bool:
         old_path = self._get_profile_path(old_name)
@@ -242,14 +364,25 @@ class ProfileManager:
         try:
             with open(import_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            base_name = os.path.splitext(os.path.basename(import_path))[0]
-            # Avoid overwriting
-            target_name = base_name
-            counter = 1
-            while target_name in self.list_profiles():
-                target_name = f"{base_name}_{counter}"
-                counter += 1
-            self.save_profile(target_name, data)
-            return True, target_name
+        except json.JSONDecodeError as jde:
+            return False, f"Malformed JSON syntax: {jde}"
         except Exception as e:
-            return False, f"Invalid profile file: {str(e)}"
+            return False, f"Error reading file: {e}"
+
+        valid, err_msg = validate_profile_dict(data)
+        if not valid:
+            return False, f"Invalid profile format: {err_msg}"
+
+        base_name = os.path.splitext(os.path.basename(import_path))[0]
+        # Sanitize name
+        clean_name = "".join(c for c in base_name if c.isalnum() or c in ("-", "_")).strip() or "ImportedProfile"
+        target_name = clean_name
+        counter = 1
+        while target_name in self.list_profiles():
+            target_name = f"{clean_name}_{counter}"
+            counter += 1
+
+        ok, save_err = self.save_profile(target_name, data)
+        if not ok:
+            return False, save_err
+        return True, target_name

@@ -32,5 +32,29 @@ class TestValidator(unittest.TestCase):
         self.assertTrue(any("unclosed" in m.lower() for m in error_msgs))
 
 
+    def test_wildcard_monitor_is_valid(self):
+        conf = "monitor = ,preferred,auto,1\n"
+        res = self.validator.validate_content(conf)
+        self.assertTrue(res.is_valid, f"Expected wildcard monitor to be valid: {res.summary()}")
+
+    def test_unclosed_quotes_detection(self):
+        conf = 'bind = SUPER, Return, exec, "kitty --single-instance\n'
+        res = self.validator.validate_content(conf)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any("unclosed quote" in e.message.lower() for e in res.errors))
+
+    def test_out_of_range_opacity(self):
+        conf = "decoration {\n    active_opacity = 1.5\n}\n"
+        res = self.validator.validate_content(conf)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any("active_opacity" in e.message.lower() for e in res.errors))
+
+    def test_negative_integer_rejection(self):
+        conf = "general {\n    gaps_in = -4\n}\n"
+        res = self.validator.validate_content(conf)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any("negative" in e.message.lower() for e in res.errors))
+
+
 if __name__ == "__main__":
     unittest.main()
